@@ -1,0 +1,6 @@
+# Patch layer for @local/pet-brain.
+# 把插件注册成一个 cordis Loader 条目（id 与 name 都等于包名），
+# 与 @local/mobile-pilot / @local/browser-use 的形态一致。
+- insert:
+    - id: '@local/pet-brain'
+      name: '@local/pet-brain'

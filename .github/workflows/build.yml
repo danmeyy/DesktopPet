@@ -1,0 +1,134 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 打 tag 时要发 Release
+
+env:
+  # 帧素材来自 npm 上的 dsh-pet 包（美术资源不随仓库分发）
+  DSH_PET_VERSION: 0.4.5
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # runner 自带的 Android SDK 已经有 platform 34 / build-tools 34，
+      # 不再用 android-actions/setup-android（它的新版 cmdline-tools 会在接受许可时退出 1）。
+      - name: 准备 Android SDK
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "SDK=$SDK"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SM" ]; then SM=$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1); fi
+          if [ -x "$SM" ]; then
+            yes | "$SM" --licenses >/dev/null 2>&1 || true
+            "$SM" --install "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+          fi
+          ls "$SDK/platforms" | tail -3
+          ls "$SDK/build-tools" | tail -3
+
+      - name: 检查 ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -hide_banner -version | head -1
+
+      # 依赖（约 60MB AAR）与编译器（kotlinc / Compose 插件 / R8）下到 compose/ 下，
+      # 缓存命中时整步跳过；改 compose/resolve.py 里的版本会自然换 key。
+      - name: 缓存 compose 依赖
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            compose/libs
+            compose/jars
+            compose/unpacked
+            compose/kc-embeddable.jar
+            compose/kotlin-stdlib.jar
+            compose/compose-plugin.jar
+            compose/r8.jar
+            compose/trove4j.jar
+            compose/annotations.jar
+          key: compose-${{ hashFiles('compose/resolve.py', 'compose/fetch-tools.sh') }}
+
+      - name: 拉依赖与编译器
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: bash compose/fetch-tools.sh
+
+      - name: 缓存转好的帧
+        id: frames
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/assets/frames
+            app/assets/index.json
+            app/assets/crop.json
+          key: frames-${{ env.DSH_PET_VERSION }}-${{ hashFiles('tools/extract.py') }}
+
+      - name: 取 dsh-pet 素材并转帧
+        if: steps.frames.outputs.cache-hit != 'true'
+        run: |
+          bash tools/fetch-frames.sh
+          du -sh app/assets/frames
+
+      - name: 打包宿主插件
+        run: python3 tools/pack-plugin.py
+
+      - name: 准备签名
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 -d > pet.keystore
+            echo "KSPASS=${KS_PASS:?需要 KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "用仓库 secret 里的签名库"
+          else
+            keytool -genkeypair -keystore pet.keystore -alias pet -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass petpet123 -keypass petpet123 \
+              -dname "CN=dsh-pet" >/dev/null
+            echo "KSPASS=petpet123" >> "$GITHUB_ENV"
+            echo "::warning::没有 KEYSTORE_BASE64，本次用临时签名（不能覆盖安装正式版）"
+          fi
+
+      - name: 构建 APK
+        env:
+          KS: ${{ github.workspace }}/pet.keystore
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        run: |
+          # 版本号以 app/AndroidManifest.xml 为准（每次发版都要跟着涨）
+          bash build-compose.sh
+          cp build/pet-*-compose.apk pet.apk
+          ls -l pet.apk
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pet-apk
+          path: pet.apk
+          if-no-files-found: error
+
+      - name: 打 tag 时发 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pet.apk
+          generate_release_notes: true

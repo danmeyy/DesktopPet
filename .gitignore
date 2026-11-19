@@ -1,0 +1,24 @@
+# 构建产物
+out/
+*.apk
+*.keystore
+*.jks
+
+# 由 tools/extract.py 从 dsh-pet 素材生成（体积大、有版权，不入库）
+app/assets/frames/
+app/assets/index.json
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# 手工工具链的中间产物（compose/fetch-tools.sh 下载/生成的，不入库）
+build/
+out-compose/
+.cache/
+compose/libs/
+compose/jars/
+compose/unpacked/
+compose/res-app/
+compose/rjava/
+compose/*.jar
